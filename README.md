@@ -1,1 +1,10 @@
 # sistemas-operativos
+
+
+
+
+
+
+
+
+##SEGUNDO PUNTO:
