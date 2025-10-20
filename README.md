@@ -1,4 +1,48 @@
 # SISTEMAS OPERATIVOS
+## PRIMER PUNTO:
+
+# Estación Meteorológica (Simulación con hilos y GUI)
+
+Simulación de una estación meteorológica que:
+- Genera mediciones cada 1 s (temperatura, humedad, presión).
+- Registra en CSV cada 5 s.
+- Grafica en tiempo real y muestra una descripción del estado.
+  
+## Arquitectura
+
+Tres tareas concurrentes:
+
+1) **Generador**  
+   Produce una medición por segundo. Aplica un *random walk* con límites físicos.
+
+2) **Logger**  
+   Acumula mediciones y vuelca al CSV cada 5 s.
+
+3) **GUI**  
+   Gráfica tiempo real (Temp, Humedad, Presión) y muestra una descripción breve con tendencias.
+
+Comunicación por:
+- `queue.Queue` para pasar mediciones al logger.
+- `deque` + `Lock` para históricos de la gráfica.
+- `Event` para parar todo con seguridad.
+
+## Requisitos
+
+- Python 3.10+
+- Paquetes:
+  - `matplotlib` (para la GUI)
+- Linux, macOS o Windows.
+- En Linux con escritorio: Tk disponible para `TkAgg`.
+
+## Instalación
+
+Opción recomendada con entorno virtual:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install matplotlib
+
 
 
 
