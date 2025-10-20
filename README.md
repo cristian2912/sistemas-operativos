@@ -26,28 +26,212 @@ Comunicación por:
 - `deque` + `Lock` para históricos de la gráfica.
 - `Event` para parar todo con seguridad.
 
-## Requisitos
+## Ejecución
 
-- Python 3.10+
-- Paquetes:
-  - `matplotlib` (para la GUI)
-- Linux, macOS o Windows.
-- En Linux con escritorio: Tk disponible para `TkAgg`.
+## Codigo Completo
+```python
+# -*- coding: utf-8 -*-
+import threading, queue, time, csv, random, signal, sys
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime
 
-## Instalación
+# ===== Modelo de datos =====
+@dataclass
+class Medicion:
+    ts: datetime
+    temp: float      # °C
+    hum: float       # %
+    pres: float      # hPa
 
-Opción recomendada con entorno virtual:
+# ===== Parámetros =====
+CSV_PATH = "registro_estacion.csv"
+PERIODO_GENERACION_S = 1
+PERIODO_LOG_S = 5
+VENTANA_PUNTOS = 300  # ~5 min con muestreo de 1 s
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install matplotlib
+# ===== Estado compartido =====
+cola_mediciones = queue.Queue()
+hist_lock = threading.Lock()
+hist_ts = deque(maxlen=VENTANA_PUNTOS)
+hist_temp = deque(maxlen=VENTANA_PUNTOS)
+hist_hum = deque(maxlen=VENTANA_PUNTOS)
+hist_pres = deque(maxlen=VENTANA_PUNTOS)
+ultima_med_lock = threading.Lock()
+ultima_med: Medicion | None = None
+stop_event = threading.Event()
+
+# ===== Hilo 1: Generador =====
+def hilo_generador():
+    t, h, p = 22.0, 60.0, 1013.0  # bases
+    rnd = random.Random()
+    while not stop_event.is_set():
+        t += rnd.uniform(-0.25, 0.25)
+        h += rnd.uniform(-1.0, 1.0)
+        p += rnd.uniform(-0.6, 0.6)
+        t = max(-10.0, min(45.0, t))
+        h = max(5.0, min(100.0, h))
+        p = max(950.0, min(1050.0, p))
+        m = Medicion(datetime.now(), round(t, 2), round(h, 2), round(p, 2))
+        cola_mediciones.put(m)
+        with hist_lock:
+            hist_ts.append(m.ts)
+            hist_temp.append(m.temp)
+            hist_hum.append(m.hum)
+            hist_pres.append(m.pres)
+        global ultima_med
+        with ultima_med_lock:
+            ultima_med = m
+        time.sleep(PERIODO_GENERACION_S)
+
+# ===== Hilo 2: Logger =====
+def hilo_logger():
+    # crea CSV si no existe
+    try:
+        with open(CSV_PATH, "x", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(["fecha", "hora", "temperatura_c", "humedad_pct", "presion_hpa"])
+    except FileExistsError:
+        pass
+    lote = []
+    t0 = time.time()
+    while not stop_event.is_set():
+        try:
+            m = cola_mediciones.get(timeout=0.5)
+            lote.append(m)
+        except queue.Empty:
+            pass
+        if time.time() - t0 >= PERIODO_LOG_S:
+            if lote:
+                with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    for m in lote:
+                        w.writerow([m.ts.date().isoformat(),
+                                    m.ts.strftime("%H:%M:%S"),
+                                    f"{m.temp:.2f}", f"{m.hum:.2f}", f"{m.pres:.2f}"])
+                lote.clear()
+            t0 = time.time()
+
+# ===== Descripción y GUI =====
+def descripcion(m: Medicion | None) -> str:
+    if not m:
+        return "Esperando datos…"
+    estado_t = "templado"
+    if m.temp < 10: estado_t = "frío"
+    elif m.temp > 30: estado_t = "caluroso"
+    estado_h = "seco" if m.hum < 30 else ("húmedo" if m.hum > 70 else "moderado")
+    with hist_lock:
+        n = len(hist_temp)
+        if n >= 30:
+            dt = hist_temp[-1] - hist_temp[-30]
+            dh = hist_hum[-1] - hist_hum[-30]
+            dp = hist_pres[-1] - hist_pres[-30]
+        else:
+            dt = dh = dp = 0.0
+    tend_t = "↗" if dt > 0.2 else ("↘" if dt < -0.2 else "→")
+    tend_h = "↗" if dh > 1.0 else ("↘" if dh < -1.0 else "→")
+    tend_p = "↗" if dp > 0.5 else ("↘" if dp < -0.5 else "→")
+    return (f"{m.ts.strftime('%H:%M:%S')} | {m.temp:.1f}°C {tend_t} ({estado_t}), "
+            f"{m.hum:.0f}% {tend_h} ({estado_h}), "
+            f"{m.pres:.0f} hPa {tend_p}")
+
+def lanzar_gui():
+    import tkinter as tk
+    from tkinter import ttk
+    import matplotlib
+    matplotlib.use("TkAgg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+    root = tk.Tk()
+    root.title("Estación meteorológica (simulación)")
+
+    frm = ttk.Frame(root, padding=8)
+    frm.pack(fill="both", expand=True)
+    lbl = ttk.Label(frm, text="Esperando datos…", font=("Segoe UI", 11))
+    lbl.pack(side="top", anchor="w", pady=(0, 6))
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax2 = ax.twinx()
+    ax3 = ax.twinx()
+    ax3.spines["right"].set_position(("outward", 50))
+
+    ln_t, = ax.plot([], [], label="Temp °C")
+    ln_h, = ax2.plot([], [], label="Humedad %")
+    ln_p, = ax3.plot([], [], label="Presión hPa")
+    ax.set_xlabel("Tiempo")
+    ax.set_ylabel("°C")
+    ax2.set_ylabel("%")
+    ax3.set_ylabel("hPa")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left")
+
+    canvas = FigureCanvasTkAgg(fig, master=frm)
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def actualizar():
+        with ultima_med_lock:
+            m = ultima_med
+        lbl.config(text=descripcion(m))
+        with hist_lock:
+            xs = list(range(len(hist_ts)))
+            t_vals = list(hist_temp)
+            h_vals = list(hist_hum)
+            p_vals = list(hist_pres)
+        if xs:
+            ln_t.set_data(xs, t_vals)
+            ln_h.set_data(xs, h_vals)
+            ln_p.set_data(xs, p_vals)
+            ax.relim(); ax.autoscale_view()
+            ax2.relim(); ax2.autoscale_view()
+            ax3.relim(); ax3.autoscale_view()
+        canvas.draw_idle()
+        if not stop_event.is_set():
+            root.after(1000, actualizar)
+
+    def on_close():
+        stop_event.set()
+        root.after(200, root.destroy)
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    root.after(500, actualizar)
+    root.mainloop()
+
+# ===== Señales y salida segura =====
+def handle_sigint(sig, frame):
+    stop_event.set()
+signal.signal(signal.SIGINT, handle_sigint)
+
+def hilo_salida():
+    """Permite salir escribiendo 'salir' en la terminal."""
+    while not stop_event.is_set():
+        try:
+            comando = input().strip().lower()
+            if comando == "salir":
+                print("Cerrando aplicación de forma segura...")
+                stop_event.set()
+                break
+        except EOFError:
+            break
+
+# ===== Main =====
+def main():
+    tg = threading.Thread(target=hilo_generador, name="Generador", daemon=True)
+    tl = threading.Thread(target=hilo_logger, name="Logger", daemon=True)
+    ts = threading.Thread(target=hilo_salida, name="Salida", daemon=True)
+    tg.start(); tl.start(); ts.start()
+    try:
+        lanzar_gui()
+    finally:
+        stop_event.set()
+        tg.join(timeout=2)
+        tl.join(timeout=2)
+        ts.join(timeout=2)
+
+if __name__ == "__main__":
+    main()
 
 
-
-
-
-
+```
 
 ## SEGUNDO PUNTO:
 
